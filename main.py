@@ -111,6 +111,16 @@ def get_property_by_id(property_id: int, bq: bigquery.Client = Depends(get_bq_cl
 # ---------------------------------------------------------------------------
 @app.get("/income/{property_id}")
 def get_income(property_id: int, bq: bigquery.Client = Depends(get_bq_client)):
+    check_query = f"SELECT property_id FROM `{PROJECT_ID}.{DATASET}.properties` WHERE property_id = {property_id} LIMIT 1"
+    
+    try:
+        prop_check = list(bq.query(check_query).result())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Property check failed: {str(e)}")
+
+    if not prop_check:
+        raise HTTPException(status_code=404, detail=f"Property with ID {property_id} not found")
+    
     """
     Returns all income records for a specific property.
     We CAST the ID to a STRING so it doesn't get distorted by JSON/JavaScript.
@@ -134,20 +144,45 @@ def get_income(property_id: int, bq: bigquery.Client = Depends(get_bq_client)):
             detail=f"Database query failed: {str(e)}"
         )
 
+
     return [dict(row) for row in results]
 
 
 @app.post("/income/{property_id}", status_code=status.HTTP_201_CREATED)
 def create_income(property_id: int, body: IncomeCreate, bq: bigquery.Client = Depends(get_bq_client)):
     """
-    Creates a new income record.
-    Returns the newly created ID as a string.
+    Creates a new income record, but only if the property exists.
     """
-    # We generate the ID in a variable first so we can return it to you
+    
+    # 1. VALIDATION: Check if the property exists first
+    check_query = f"""
+        SELECT property_id 
+        FROM `{PROJECT_ID}.{DATASET}.properties` 
+        WHERE property_id = {property_id} 
+        LIMIT 1
+    """
+    
+    try:
+        prop_check = list(bq.query(check_query).result())
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error verifying property: {str(e)}"
+        )
+
+    if not prop_check:
+        # If no property is found, stop here and return an error
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail=f"Cannot create income: Property ID {property_id} does not exist."
+        )
+
+    # 2. GENERATE ID: Now that we know the property is valid, get a new ID
     new_id_query = "SELECT ABS(FARM_FINGERPRINT(GENERATE_UUID())) as val"
     id_result = list(bq.query(new_id_query).result())
     generated_id = id_result[0].val
 
+    # 3. INSERT: Create the record
     query = f"""
         INSERT INTO `{PROJECT_ID}.{DATASET}.income` (income_id, property_id, amount, date, description)
         VALUES (
@@ -164,12 +199,12 @@ def create_income(property_id: int, body: IncomeCreate, bq: bigquery.Client = De
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database query failed: {str(e)}"
+            detail=f"Database insertion failed: {str(e)}"
         )
 
     return {
         "message": "Income record created",
-        "income_id": str(generated_id)  # Return as string to avoid scientific notation
+        "income_id": str(generated_id)
     }
 
 
@@ -181,8 +216,20 @@ def create_income(property_id: int, body: IncomeCreate, bq: bigquery.Client = De
 def get_expenses(property_id: int, bq: bigquery.Client = Depends(get_bq_client)):
     """
     Returns all expense records for a specific property.
-    Casting expense_id to STRING to prevent JSON scientific notation.
+    Validates property existence first.
     """
+    # 1. Check if the property exists
+    check_query = f"SELECT property_id FROM `{PROJECT_ID}.{DATASET}.properties` WHERE property_id = {property_id} LIMIT 1"
+    
+    try:
+        prop_check = list(bq.query(check_query).result())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Property check failed: {str(e)}")
+
+    if not prop_check:
+        raise HTTPException(status_code=404, detail=f"Property with ID {property_id} not found")
+
+    # 2. Fetch the expenses
     query = f"""
         SELECT 
             CAST(expense_id AS STRING) AS expense_id,
@@ -210,13 +257,33 @@ def get_expenses(property_id: int, bq: bigquery.Client = Depends(get_bq_client))
 @app.post("/expenses/{property_id}", status_code=status.HTTP_201_CREATED)
 def create_expense(property_id: int, body: ExpenseCreate, bq: bigquery.Client = Depends(get_bq_client)):
     """
-    Creates a new expense record for a property.
-    Note: 'date' must be in YYYY-MM-DD format.
+    Creates a new expense record for a property only if it exists.
+    Returns the newly created ID.
     """
+    # 1. VALIDATION: Check if the property exists
+    check_query = f"SELECT property_id FROM `{PROJECT_ID}.{DATASET}.properties` WHERE property_id = {property_id} LIMIT 1"
+    
+    try:
+        prop_check = list(bq.query(check_query).result())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error verifying property: {str(e)}")
+
+    if not prop_check:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail=f"Cannot create expense: Property ID {property_id} does not exist."
+        )
+
+    # 2. GENERATE ID: Same logic as income for consistency
+    new_id_query = "SELECT ABS(FARM_FINGERPRINT(GENERATE_UUID())) as val"
+    id_result = list(bq.query(new_id_query).result())
+    generated_id = id_result[0].val
+
+    # 3. INSERT: Create the record
     query = f"""
         INSERT INTO `{PROJECT_ID}.{DATASET}.expenses` (expense_id, property_id, amount, date, category, vendor, description)
         VALUES (
-            ABS(FARM_FINGERPRINT(GENERATE_UUID())),
+            {generated_id},
             {property_id},
             {body.amount},
             '{body.date}',
@@ -234,8 +301,10 @@ def create_expense(property_id: int, body: ExpenseCreate, bq: bigquery.Client = 
             detail=f"Failed to create expense record: {str(e)}"
         )
 
-    return {"message": "Expense record created"}
-
+    return {
+        "message": "Expense record created",
+        "expense_id": str(generated_id)
+    }
 
 # ---------------------------------------------------------------------------
 # Additional: Income PUT/DELETE
@@ -243,9 +312,6 @@ def create_expense(property_id: int, body: ExpenseCreate, bq: bigquery.Client = 
 
 @app.put("/income/{income_id}")
 def update_income(income_id: str, body: IncomeUpdate, bq: bigquery.Client = Depends(get_bq_client)):
-    """
-    Additional Endpoint 1: Updates an existing income record by its ID.
-    """
     updates = []
     if body.amount is not None: updates.append(f"amount = {body.amount}")
     if body.date is not None: updates.append(f"date = '{body.date}'")
@@ -261,27 +327,40 @@ def update_income(income_id: str, body: IncomeUpdate, bq: bigquery.Client = Depe
     """
 
     try:
-        bq.query(query).result()
+        query_job = bq.query(query)
+        query_job.result() # Wait for job to finish
+        
+        # Check if any row was actually updated
+        if query_job.num_dml_affected_rows == 0:
+            raise HTTPException(status_code=404, detail=f"Income record {income_id} not found")
+            
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
     return {"message": "Income record updated"}
 
 
-@app.delete("/income/{income_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/income/{income_id}")
 def delete_income(income_id: str, bq: bigquery.Client = Depends(get_bq_client)):
-    """
-    Additional Endpoint 2: Deletes a specific income record.
-    """
     query = f"DELETE FROM `{PROJECT_ID}.{DATASET}.income` WHERE CAST(income_id AS STRING) = '{income_id}'"
 
     try:
-        bq.query(query).result()
+        query_job = bq.query(query)
+        query_job.result()
+
+        if query_job.num_dml_affected_rows == 0:
+            raise HTTPException(status_code=404, detail=f"Income record {income_id} not found")
+            
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")
 
-    return None
-
+    # We return a message here instead of 204 because 204 hides the response body 
+    # which makes debugging the "not found" logic harder in some tools.
+    return {"message": "Income record deleted"}
 
 # ---------------------------------------------------------------------------
 # Additional: Expense PUT/DELETE
@@ -289,9 +368,6 @@ def delete_income(income_id: str, bq: bigquery.Client = Depends(get_bq_client)):
 
 @app.put("/expenses/{expense_id}")
 def update_expense(expense_id: str, body: ExpenseUpdate, bq: bigquery.Client = Depends(get_bq_client)):
-    """
-    Additional Endpoint 3: Updates an existing expense record by its ID.
-    """
     updates = []
     if body.amount is not None: updates.append(f"amount = {body.amount}")
     if body.date is not None: updates.append(f"date = '{body.date}'")
@@ -309,23 +385,34 @@ def update_expense(expense_id: str, body: ExpenseUpdate, bq: bigquery.Client = D
     """
 
     try:
-        bq.query(query).result()
+        query_job = bq.query(query)
+        query_job.result()
+
+        if query_job.num_dml_affected_rows == 0:
+            raise HTTPException(status_code=404, detail=f"Expense record {expense_id} not found")
+            
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
     return {"message": "Expense record updated"}
 
 
-@app.delete("/expenses/{expense_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/expenses/{expense_id}")
 def delete_expense(expense_id: str, bq: bigquery.Client = Depends(get_bq_client)):
-    """
-    Additional Endpoint 4: Deletes a specific expense record.
-    """
     query = f"DELETE FROM `{PROJECT_ID}.{DATASET}.expenses` WHERE CAST(expense_id AS STRING) = '{expense_id}'"
 
     try:
-        bq.query(query).result()
+        query_job = bq.query(query)
+        query_job.result()
+
+        if query_job.num_dml_affected_rows == 0:
+            raise HTTPException(status_code=404, detail=f"Expense record {expense_id} not found")
+            
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")
 
-    return None
+    return {"message": "Expense record deleted"}
