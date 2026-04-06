@@ -14,7 +14,7 @@ DATASET = "property_mgmt"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],       # accept requests from any origin
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],       # accept any request headers
 )
 
