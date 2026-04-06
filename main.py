@@ -1,11 +1,23 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from google.cloud import bigquery
 from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
 PROJECT_ID = "dev-489415"
 DATASET = "property_mgmt"
+
+# CORS middleware tells the browser which cross-origin requests are allowed.
+# Allowing all origins ("*") is fine for a classroom demo but should be
+# restricted to specific domains in a real production application.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],       # accept requests from any origin
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],       # accept any request headers
+)
+
 
 # ---------------------------------------------------------------------------
 # Pydantic Models
